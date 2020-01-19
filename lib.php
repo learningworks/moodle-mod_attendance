@@ -536,3 +536,104 @@ function attendance_remove_user_from_thirdpartyemails($warnings, $userid) {
         $DB->update_record('attendance_warning', $updatedwarning);
     }
 }
+
+/**
+ * This function receives a calendar event and returns the action associated with it, or null if there
+ * is none. Used by block_timeline to display the event in correct order. If null is returned then the event
+ * is not displayed on the block.
+ *
+ * @param calendar_event $event
+ * @param \core_calendar\action_factory $factory
+ * @param int $userid
+ * @return \core_calendar\local\event\entities\action_interface|\core_calendar\local\event\value_objects\action|void
+ * @throws coding_exception
+ * @throws dml_exception
+ * @throws moodle_exception
+ */
+function mod_attendance_core_calendar_provide_event_action(
+    calendar_event $event,
+    \core_calendar\action_factory $factory,
+    $userid = 0
+) {
+    global $USER, $DB;
+
+    if ($userid) {
+        $user = core_user::get_user($userid);
+    } else {
+        $user = $USER;
+    }
+
+    $coursemodules = get_fast_modinfo($event->courseid, $userid)->get_instances_of('attendance');
+    // Extra safety check to make sure the associated cm exists.
+    if (!isset($coursemodules[$event->instance])) {
+        return null;
+    }
+
+    $cm = $coursemodules[$event->instance];
+
+    if (!$cm->uservisible) {
+        return null;
+    }
+
+    $record = $DB->get_record('attendance', ['id' => $cm->instance]);
+    if (!$record) {
+        return null;
+    }
+    $attendance = new mod_attendance_structure($record, $cm->get_course_module_record(), $cm->get_course());
+    $session = $DB->get_record('attendance_sessions', ['attendanceid' => $attendance->id, 'caleventid' => $event->id]);
+    if (!$session) {
+        return null;
+    }
+
+    $context = $cm->context;
+    $timenow = time();
+    $timestart = $session->sessdate;
+    $timeend = $session->sessdate + $session->duration;
+    $gracetimeend = $timeend + 1800; // 3O minutes.
+
+    // User can mark students attended.
+    if (has_capability('mod/attendance:takeattendances', $context, $user) ) {
+        return $factory->create_instance(
+            get_string('takeattendance', 'mod_attendance'),
+            new \moodle_url(
+                '/mod/attendance/take.php',
+                [
+                    'id' => $cm->id,
+                    'sessionid' => $session->id,
+                    'grouptype'=> 0,
+                    'group'=> $event->groupid
+                ]
+            ),
+            1,
+            1
+        );
+    }
+
+    // Student can mark own submission.
+    if ($session->studentscanmark && ($timenow > $timestart) && ($timenow < $gracetimeend)) {
+        return $factory->create_instance(
+            format_text($session->description),
+            new \moodle_url(
+                '/mod/attendance/attendance.php', ['sessid' => $session->id]
+            ),
+            1,
+            1
+        );
+    }
+
+    // Standard view action.
+    return $factory->create_instance(
+        format_text($session->description),
+        new \moodle_url(
+            '/mod/attendance/view.php',
+            [
+                'id' => $cm->id,
+                'studentid' => $user->id,
+                'curdate' => $timestart
+            ]
+        ),
+        1,
+        1
+    );
+
+}
